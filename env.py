@@ -1203,6 +1203,7 @@ import qa_false_negative  # noqa: F401, E402
 import qa_false_positive  # noqa: F401, E402
 import qa_prompt_alignment  # noqa: F401, E402
 import qa_reward_hacking  # noqa: F401, E402
+import qa_01_false_negative  # noqa: F401, E402
 
 if __name__ == "__main__":
     env.run(transport="stdio")
