@@ -31,7 +31,7 @@ async def test_coding_task_false_negative(trace_id:str):
 
     async with hud.eval(task) as ctx:
         agent = ClaudeAgent.create(model="claude-sonnet-4-5")
-        result = await agent.run(ctx, max_steps=70)
+        result = await agent.run(ctx, max_steps=50)
         raw_content = result.content or ""
         if isinstance(raw_content, str):
             print(f"Content: {raw_content}")

@@ -91,7 +91,7 @@ else:
 env = Environment(name="trace-explorer")
 
 # Add Claude/OpenCode-style tools (with base_path for sandboxing)
-env.add_tool(BashTool())
+env.add_tool(BashTool(timeout=300.0))
 env.add_tool(EditTool())
 env.add_tool(ReadTool(base_path=BASE_PATH))
 env.add_tool(GrepTool(base_path=BASE_PATH))
