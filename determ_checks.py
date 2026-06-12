@@ -3,9 +3,8 @@
 
 Walks task roots (directories containing prompt.md + tests/) and reports
 mechanical mismatches between what hidden grader tests assert and what the
-agent-visible prompt exposes. Tests are environment infrastructure — the agent
-is not asked to write them — so checks only flow from tests toward the prompt
-(or validate grader wiring), never the reverse.
+agent-visible prompt exposes. Agents do not write tests, but task authors
+should still keep prompt specs and grader tests aligned in both directions.
 """
 
 from __future__ import annotations
@@ -79,14 +78,22 @@ class Report:
 
 _REGEX_METACHAR = re.compile(r"[.^$*+?{}[\]|\\()]")
 
-# Prompt patterns for explicitly pinned messages
-_PROMPT_MSG_PATTERNS = [
+# Explicit error-message pins in the prompt (strict — used for coverage checks)
+_PROMPT_PINNED_ERROR_PATTERNS = [
     re.compile(r'with message\s+`"([^"]+)"`', re.I),
     re.compile(r'with message\s+"([^"]+)"', re.I),
     re.compile(r'message\s+`"([^"]+)"`', re.I),
     re.compile(r'Raises\s+\w+\s+with\s+message\s+"([^"]+)"', re.I),
+]
+
+# Broader literals for context in error_message_alignment diagnostics
+_PROMPT_MSG_PATTERNS = [
+    *_PROMPT_PINNED_ERROR_PATTERNS,
     re.compile(r'`"([^"]+)"`'),  # backtick-wrapped literals in spec
 ]
+
+_MIN_PINNED_MSG_LEN = 12
+_PLACEHOLDER_RE = re.compile(r"\{[^}]+\}")
 
 
 def prompt_corpus(prompt_text: str) -> str:
@@ -98,6 +105,78 @@ def prompt_declared_messages(prompt_text: str) -> set[str]:
     for pat in _PROMPT_MSG_PATTERNS:
         msgs.update(pat.findall(prompt_text))
     return msgs
+
+
+def _is_pinned_error_message(msg: str) -> bool:
+    """Filter out repr examples, short tokens, and template placeholders."""
+    if len(msg) < _MIN_PINNED_MSG_LEN:
+        return False
+    if _PLACEHOLDER_RE.search(msg):
+        return False
+    if "%" in msg:
+        return False
+    if not re.search(r"[a-zA-Z]{4,}", msg):
+        return False
+    return True
+
+
+def prompt_pinned_error_messages(prompt_text: str) -> set[str]:
+    msgs: set[str] = set()
+    for pat in _PROMPT_PINNED_ERROR_PATTERNS:
+        for msg in pat.findall(prompt_text):
+            if _is_pinned_error_message(msg):
+                msgs.add(msg)
+    return msgs
+
+
+def _significant_literals(text: str, *, min_len: int = 6) -> list[str]:
+    chunks = re.split(r"[%{\s]+", text)
+    return [c for c in chunks if len(c) >= min_len and re.search(r"[a-zA-Z]", c)]
+
+
+def test_pattern_covers_message(msg: str, pattern: str) -> tuple[bool, str]:
+    """Return (covered, quality) where quality is exact/literal/substring/loose."""
+    if not is_probably_regex(pattern):
+        if pattern == msg:
+            return True, "exact"
+        if len(pattern) >= 8 and pattern in msg:
+            return True, "literal"
+        if msg in pattern:
+            return True, "literal"
+        if len(pattern) >= 6 and pattern in msg:
+            return True, "substring"
+        return False, ""
+
+    pat_literals = literal_tokens_from_regex(pattern)
+    for pl in pat_literals:
+        if len(pl) >= 6 and pl in msg:
+            return True, "literal"
+
+    for ml in _significant_literals(msg):
+        if ml in pattern:
+            return True, "literal"
+        if any(ml in pl for pl in pat_literals if len(pl) >= 4):
+            return True, "substring"
+
+    if pat_literals and all(len(pl) < 6 for pl in pat_literals):
+        return True, "loose"
+    if is_probably_regex(pattern) and not pat_literals:
+        return False, ""
+
+    return False, ""
+
+
+def classify_prompt_message_coverage(msg: str, patterns: set[str]) -> str:
+    """Return 'covered', 'loose', or 'uncovered'."""
+    saw_loose = False
+    for pat in patterns:
+        covered, quality = test_pattern_covers_message(msg, pat)
+        if not covered:
+            continue
+        if quality in ("exact", "literal", "substring"):
+            return "covered"
+        saw_loose = True
+    return "loose" if saw_loose else "uncovered"
 
 
 def is_probably_regex(pattern: str) -> bool:
@@ -278,7 +357,49 @@ def check_error_messages_in_prompt(task_dir: Path, report: Report) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Check 2: task.py grader wiring (task-agnostic)
+# Check 2: explicitly pinned prompt error messages should be tested
+# ---------------------------------------------------------------------------
+
+def check_prompt_messages_are_tested(task_dir: Path, report: Report) -> None:
+    prompt_text = (task_dir / "prompt.md").read_text(encoding="utf-8", errors="replace")
+    pinned = prompt_pinned_error_messages(prompt_text)
+    if not pinned:
+        return
+
+    tested_patterns: set[str] = set()
+    for test_file in (task_dir / "tests").glob("test_*.py"):
+        for assertion in extract_message_assertions(test_file):
+            if not assertion.synthetic:
+                tested_patterns.add(assertion.pattern)
+
+    for msg in sorted(pinned):
+        status = classify_prompt_message_coverage(msg, tested_patterns)
+        if status == "uncovered":
+            report.add(
+                check="prompt_message_coverage",
+                severity="warning",
+                task=str(task_dir),
+                message=(
+                    f"Prompt explicitly pins error message {msg!r} "
+                    f"but no test uses a substantive pytest.raises(..., match=...) "
+                    f"or substring assert for it"
+                ),
+            )
+        elif status == "loose":
+            report.add(
+                check="prompt_message_coverage",
+                severity="warning",
+                task=str(task_dir),
+                message=(
+                    f"Prompt explicitly pins error message {msg!r} "
+                    f"but test match patterns look too loose to enforce it "
+                    f"(review grader strictness)"
+                ),
+            )
+
+
+# ---------------------------------------------------------------------------
+# Check 3: task.py grader wiring (task-agnostic)
 # ---------------------------------------------------------------------------
 
 _INJECT_RE = re.compile(r'_inject_and_run\(\s*[\'"]([^\'"]+)[\'"]\s*\)')
@@ -322,7 +443,7 @@ def check_task_py_wiring(task_dir: Path, report: Report) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Check 3: package name in prompt vs tests
+# Check 4: package name in prompt vs tests
 # ---------------------------------------------------------------------------
 
 def check_import_package_alignment(task_dir: Path, report: Report) -> None:
@@ -355,13 +476,47 @@ def check_import_package_alignment(task_dir: Path, report: Report) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Check 5: public re-exports in prompt should appear in grader tests
+# ---------------------------------------------------------------------------
+
+def check_prompt_public_api_smoke(task_dir: Path, report: Report) -> None:
+    prompt_text = (task_dir / "prompt.md").read_text(encoding="utf-8", errors="replace")
+    block = re.search(r"from \.[\s\S]+?from \.", prompt_text)
+    if not block:
+        return
+    names = re.findall(r"^\s*(\w+)\s*,", block.group(0), re.M)
+    names += re.findall(r"^\s*(\w+)\s*\)", block.group(0), re.M)
+    names = [n for n in set(names) if len(n) >= 3 and not n.startswith("_")]
+    if not names:
+        return
+
+    test_blob = "\n".join(
+        p.read_text(encoding="utf-8", errors="replace")
+        for p in (task_dir / "tests").glob("test_*.py")
+    )
+    for name in sorted(names):
+        if name not in test_blob:
+            report.add(
+                check="public_api_coverage",
+                severity="info",
+                task=str(task_dir),
+                message=(
+                    f"Prompt re-exports {name!r} but name never appears in grader tests "
+                    f"(may be OK if tested indirectly)"
+                ),
+            )
+
+
+# ---------------------------------------------------------------------------
 # Runner / CLI
 # ---------------------------------------------------------------------------
 
 ALL_CHECKS = {
     "error_messages": check_error_messages_in_prompt,
+    "prompt_coverage": check_prompt_messages_are_tested,
     "task_py": check_task_py_wiring,
     "package_name": check_import_package_alignment,
+    "public_api": check_prompt_public_api_smoke,
 }
 
 
