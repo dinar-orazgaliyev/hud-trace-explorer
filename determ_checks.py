@@ -2,7 +2,10 @@
 """Deterministic prompt/grader consistency checks (task-type agnostic).
 
 Walks task roots (directories containing prompt.md + tests/) and reports
-mechanical mismatches between what tests assert and what the prompt exposes.
+mechanical mismatches between what hidden grader tests assert and what the
+agent-visible prompt exposes. Tests are environment infrastructure — the agent
+is not asked to write them — so checks only flow from tests toward the prompt
+(or validate grader wiring), never the reverse.
 """
 
 from __future__ import annotations
@@ -13,7 +16,7 @@ import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable, Iterator
+from typing import Iterable
 
 # ---------------------------------------------------------------------------
 # Discovery
@@ -275,38 +278,7 @@ def check_error_messages_in_prompt(task_dir: Path, report: Report) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Check 2: prompt-declared messages should be tested (reverse direction)
-# ---------------------------------------------------------------------------
-
-def check_prompt_messages_are_tested(task_dir: Path, report: Report) -> None:
-    prompt_text = (task_dir / "prompt.md").read_text(encoding="utf-8", errors="replace")
-    declared = prompt_declared_messages(prompt_text)
-    if not declared:
-        return
-
-    tested_patterns: set[str] = set()
-    for test_file in (task_dir / "tests").glob("test_*.py"):
-        for a in extract_message_assertions(test_file):
-            if not a.synthetic:
-                tested_patterns.add(a.pattern)
-
-    for msg in sorted(declared):
-        if not any(msg in pat or pat in msg for pat in tested_patterns):
-            if msg not in prompt_text:  # always true; sanity
-                pass
-            report.add(
-                check="prompt_message_coverage",
-                severity="warning",
-                task=str(task_dir),
-                message=(
-                    f'Prompt declares exact message {msg!r} but no test uses '
-                    f'pytest.raises(..., match=...) or substring assert for it'
-                ),
-            )
-
-
-# ---------------------------------------------------------------------------
-# Check 3: task.py grader wiring (task-agnostic)
+# Check 2: task.py grader wiring (task-agnostic)
 # ---------------------------------------------------------------------------
 
 _INJECT_RE = re.compile(r'_inject_and_run\(\s*[\'"]([^\'"]+)[\'"]\s*\)')
@@ -350,7 +322,7 @@ def check_task_py_wiring(task_dir: Path, report: Report) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Check 4: package name in prompt vs tests
+# Check 3: package name in prompt vs tests
 # ---------------------------------------------------------------------------
 
 def check_import_package_alignment(task_dir: Path, report: Report) -> None:
@@ -383,43 +355,13 @@ def check_import_package_alignment(task_dir: Path, report: Report) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Check 5: public re-exports in prompt exist as import targets in tests
-# ---------------------------------------------------------------------------
-
-def check_prompt_public_api_smoke(task_dir: Path, report: Report) -> None:
-    prompt_text = (task_dir / "prompt.md").read_text(encoding="utf-8", errors="replace")
-    block = re.search(r"from \.[\s\S]+?from \.", prompt_text)  # crude: first re-export block
-    if not block:
-        return
-    names = re.findall(r"^\s*(\w+)\s*,", block.group(0), re.M)
-    names += re.findall(r"^\s*(\w+)\s*\)", block.group(0), re.M)
-    if not names:
-        return
-
-    test_blob = "\n".join(
-        p.read_text(encoding="utf-8", errors="replace")
-        for p in (task_dir / "tests").glob("test_*.py")
-    )
-    for name in sorted(set(names)):
-        if name not in test_blob:
-            report.add(
-                check="public_api_coverage",
-                severity="info",
-                task=str(task_dir),
-                message=f"Prompt re-exports {name!r} but name never appears in tests (may be OK)",
-            )
-
-
-# ---------------------------------------------------------------------------
 # Runner / CLI
 # ---------------------------------------------------------------------------
 
 ALL_CHECKS = {
     "error_messages": check_error_messages_in_prompt,
-    "prompt_coverage": check_prompt_messages_are_tested,
     "task_py": check_task_py_wiring,
     "package_name": check_import_package_alignment,
-    "public_api": check_prompt_public_api_smoke,
 }
 
 
