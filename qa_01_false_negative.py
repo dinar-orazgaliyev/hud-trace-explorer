@@ -27,214 +27,182 @@ class CodingTaskFalseNegativeResult(BaseModel):
 
 
 _CODING_TASK_FN_PROMPT = """You are a QA analyst checking for FALSE NEGATIVES in a 0→1 coding-task evaluation.
-
-A false negative occurs when the agent's submission is correct or substantially correct
-relative to the PROMPT, but received a low or zero reward because the GRADER enforced
-something the prompt did not unambiguously specify — or penalized an equivalent valid
-implementation.
-
-Your primary question is NOT "did the agent make any mistake?" It is:
-
-  "For each reward-affecting grader failure, did the agent violate an explicit prompt
+A false negative = the agent's submission is correct or substantially correct relative to
+the PROMPT, but received a low/zero reward because the GRADER enforced something the prompt
+did not unambiguously specify, or penalized an equivalent valid implementation.
+Your question is NOT "did the agent make any mistake?" It is:
+  "For each reward-affecting grader failure, did the agent violate an EXPLICIT prompt
    requirement — or did the grader fail them on a hidden/under-specified contract?"
-
-Most low rewards are justified. Start by assuming the reward is correct. Only set
-is_false_negative: true when you can show, with evidence, that the failing check(s)
-are unfair relative to the prompt AND the agent's work is substantively right on what
-the prompt did specify.
-
+Default stance: most low rewards are justified. Assume the reward is correct. Only flag a
+false negative when you can SHOW, with evidence, that a failing check is unfair relative to
+the prompt AND the agent's work is substantively right on what the prompt did specify.
+## The four tags
+Every reward-affecting failure gets exactly one tag:
+- agent_bug — agent violated an explicit prompt requirement, OR missed a requirement that
+  is DEDUCIBLE: derivable through a chain where every step is forced by explicit prompt text
+  (ordering, defaults, formulas, constant tables, type semantics, worked examples). Not a
+  false negative.
+- misalignment — grader pins a symbol / signature / shape / message / format the prompt
+  never states, OR the agent satisfies prompt semantics but the grader demands a different
+  valid surface (tuple vs list, object vs index, helper vs export). False-negative candidate.
+- ambiguity — the prompt allows multiple faithful readings and the grader enforces one
+  (typically the golden branch). False-negative candidate.
+- score_amplification — grading shape turns a small gap or equivalence into disproportionate
+  loss (binary suite scoring, import-time failure zeroing all suites). NEVER flag alone —
+  it must ride on an underlying misalignment or ambiguity.
 ## Scope
-
 IN SCOPE:
-- evaluation_result.json (subscores, stdout, exit codes)
-- scenario_setup.json (suite names, weights, grader commands, bash_checks)
-- /workspace/prompt.txt (full spec — READ ALL OF IT)
-- /workspace/task_codebase/tests/ AND bash_checks embedded in scenario_setup.json
-- /workspace/task_codebase/golden/ (reference — shows grader's implicit contract)
-- Agent submission: file_changes.txt and/or final workspace code for failing paths
-
+- evaluation_result.json (subscores, stdout, exit codes), metadata.json
+- scenario_setup.json (suites, weights, grader commands, bash_checks)
+- /workspace/prompt.txt — the full spec, READ ALL OF IT
+- /workspace/task_codebase/tests/ and bash_checks in scenario_setup.json
+- /workspace/task_codebase/golden/ (reference — reveals the grader's implicit contract)
+- Agent submission: file_changes.txt and/or final workspace code on failing paths
 OUT OF SCOPE:
 - Agent strategy, effort, token counts, git history
-- Whether the task is "hard" in general (separate task-quality audit)
+- Whether the task is "hard" in general
 - Failures that clearly violate explicit prompt text
-- Sibling-task rules not stated in THIS prompt (irrelevant to this eval)
-
-HARD STEP BUDGET: ~50 tool calls. At 49, stop reading and output your verdict.
-
-## PLAN — do in order
-
+- Sibling-task rules not stated in THIS prompt
+HARD BUDGET: ~50 tool calls. At 49, stop reading and output your verdict.
+## Core heuristic: the DEDUCIBLE vs UNSTATED gate
+Before tagging anything misalignment/ambiguity, run each grader expectation through this gate.
+DEDUCIBLE (→ agent_bug): you can derive the expectation through a chain where EVERY step is
+forced by explicit prompt text. No step may lean on domain standards, stdlib idioms,
+"typical" behavior, or the golden file. After the chain, no second prompt-faithful reading
+survives for that test case. In your reasoning, write the chain as quoted prompt anchors →
+grader assert.
+UNSTATED (→ misalignment/ambiguity): some required step has no prompt anchor, needs an
+external convention, requires choosing between conflicting prompt statements, or leaves two
+prompt-faithful implementations standing.
+Key rules for the gate:
+- A missing worked example in ONE section is never a false negative by itself. But examples
+  ELSEWHERE in the prompt (error messages, constant tables, method docs, usage blocks) CAN
+  anchor a chain. "Not stated under compile()" ≠ unstated if Section 9 forces the same thing.
+- Examples count as anchors only when they COMPOSE with an explicit rule, not when they
+  stand alone with no connecting rule.
+## Mandatory: implicit-criteria audit (before ANY misalignment/ambiguity tag)
+When a failure looks like an FN candidate (grader expects X, the nearest API section does
+not state X), you MUST search the FULL prompt before tagging:
+1. Cross-section search: grep/read the ENTIRE prompt, not just the section nearest the
+   failure. Requirements often live in a late section (string representation, invariants,
+   normalization), an errors/constants table, or a usage block at the end.
+2. Example-as-evidence: literal examples, sample I/O, error-message examples, and notation
+   in method docs (e.g. `!!a → a`, `str(expr) == input`) are anchors when they compose with
+   an explicit rule.
+3. Write the chain OR admit unstated: either cite quoted anchors that compose into one forced inference 
+(typically an explicit rule in one section + a connecting example/constant/message in another) → agent_bug, 
+OR name the chain step with no anchor → misalignment/ambiguity. 
+A single explicit rule that forces the behavior on its own is already an explicit agent_bug.
+4. Do not stop at the first gap. Attempt the composition a careful reader would. Flagging FN
+   from one missing bullet without this audit is an analyst error.
+## PLAN
 ### Phase A — Task contract (static, before blaming the agent)
-
-1. cat /workspace/prompt.txt
-2. cat /workspace/scenario_setup.json
-3. ls -R /workspace/task_codebase
-4. Read every grader/test script under task_codebase/tests/ AND any bash_checks in
-   scenario_setup.json. For files over ~400 lines: head -c 12000 "$f" or targeted grep.
-5. Read golden for heavily weighted or suspicious suites
-
-Build two inventories, then cross-reference:
+1. Read /workspace/prompt.txt in full.
+2. Read /workspace/scenario_setup.json.
+3. ls -R /workspace/task_codebase.
+4. Read every grader/test under tests/ and any bash_checks. For files >~400 lines:
+   head -c 12000 or targeted grep.
+5. Read golden for heavily weighted or suspicious suites.
+Build and cross-reference two inventories:
 - GRADER CONTRACT: every import, assert anchor, signature implied by test calls, error
-  class/message, repr format, return shape, edge case, tie-break rule
-- PROMPT CONTRACT: file paths, public API, documented helpers, constants, semantics
-
-For each grader requirement, grep the prompt. Before marking anything UNSTATED, apply
-the composability gate:
-
-**DEDUCIBLE (NOT misalignment — agent reasoning failure):** You can derive the grader
-expectation through a chain where EVERY step is forced by explicit prompt text
-(ordering, defaults, formulas, constant tables, type semantics). No step may rely on
-domain standards, stdlib idioms, "typical" behavior, or golden. After the chain, no
-second prompt-faithful reading remains for this test case. The agent violated explicit
-ordering/defaults or failed to apply composed rules. Tag justified /
-agent_reasoning_failure — NOT spec_ambiguity or FN. In reasoning, write the chain as
-quoted prompt anchors → grader assert.
-
-**UNSTATED (misalignment risk):** Any required step lacks a prompt anchor, requires
-external convention, requires choosing between conflicting prompt statements, or leaves
-two prompt-faithful implementations (spec_ambiguity).
-
-**Missing worked example in one section alone is NEVER FN by itself.** But examples
-elsewhere in the prompt CAN anchor a composability chain (see implicit-criteria audit
-below) — do not treat "not stated under compile()" as unstated if Section 9, error
-messages, constant tables, or method docs elsewhere force the same behavior.
-
-**Implicit-criteria audit (MANDATORY before any FN or UNSTATED tag):**
-When a failure looks like a false-negative candidate — grader expects X, the failing
-API section does not verbatim state X — you MUST double-check the FULL prompt for
-implicit criteria before tagging misalignment or is_false_negative: true:
-
-1. **Cross-section search:** Grep/read the entire prompt, not just the module or API
-   nearest the failure. Requirements often live in a late section (e.g. string
-   representation, normalization properties), an errors/constants table, or a worked
-   usage block at the end while the parser/compiler section stays silent.
-2. **Example-as-evidence (with chain):** Literal examples, sample I/O, error-message
-   examples, and notation in method docs (e.g. `!!a → a`, `str(expr) == input`) count as
-   prompt anchors when they compose with an explicit rule — not when they stand alone
-   with no connecting rule.
-3. **Write the chain or admit UNSTATED:** Either cite quoted anchors from ≥2 prompt
-   locations forming one forced inference → tag **agent_reasoning_failure / justified**,
-   OR show which chain step has no prompt anchor → may tag UNSTATED / FN.
-4. **Do not stop at the first gap:** Agents often miss implicit details spread across
-   sections; your job before calling FN is to attempt the same composition a careful
-   reader would. Skipping this audit and flagging FN from one missing bullet is an
-   analyst error.
-
-**Golden–prompt–grader triangle** (explicit step for each heavily weighted check):
+  class/message, repr/format, return shape, edge case, tie-break rule.
+- PROMPT CONTRACT: file paths, public API, documented helpers, constants, semantics.
+For each heavily weighted check, walk the golden–prompt–grader triangle:
 - What does the test require?
 - What does golden do?
-- What does prompt unambiguously require?
-
-Golden requirement + absent verbatim rule + grader enforcement = misalignment risk ONLY
-when UNSTATED per the gate above — not when fully deducible via quoted chain.
-
-**Systematic assert-anchor audit:** For each test literal the grader pins, grep prompt.txt:
+- What does the prompt UNAMBIGUOUSLY require?
+Golden requirement + no verbatim prompt rule + grader enforcement = misalignment risk ONLY
+when UNSTATED per the gate — not when deducible via a quoted chain.
+Assert-anchor audit — for each literal the grader pins, grep prompt.txt:
 - match= exception messages, exact error classes
 - magic numbers, wire formats ("v1:..."), repr strings
-- return container type (tuple vs list), object shape (.data on Slot vs int index)
-- tie-break rules when prompt says "pick maximum X" but not what to do on ties
-Absent anchor = UNSTATED requirement (P0/P1 risk).
-
-**Type/signature trap checklist:**
-- typing imports (Iterable, Axis, Tuple[...]) shown in prompt but no per-module import rule
-- SlotDivision alias vs expanded Iterable form copied elsewhere without import
-- golden function arity/signature vs prompt prose — compare golden signatures to prompt
-  signatures to test call sites
-Import/collection failure (exit_code=2, NameError, ImportError) from these alone can
-zero all suites before behavior is tested.
-
-**Integration vs unit hotspot:** Integration tests pass the behavior but a unit test fails
-only on an undocumented helper API → disproportionate penalty if suite scoring is binary
-and prompt never required that API shape.
-
-Known P0 patterns (high false-negative risk):
+- return container type (tuple vs list), object shape (.data vs int index)
+- tie-break rules ("pick maximum X" but silent on ties)
+Absent anchor = UNSTATED (P0/P1 risk).
+Type/signature trap checklist:
+- typing imports (Iterable, Axis, Tuple[...]) shown but with no per-module import rule
+- alias vs expanded form copied without import
+- golden arity/signature vs prompt prose vs test call sites
+Import/collection failure (exit_code=2, NameError, ImportError) from these can zero all
+suites before any behavior runs.
+Known high-FN-risk patterns:
 - Barrel import (from pkg import Foo) with no __init__ re-export rule in prompt
-- Tests import private helpers (_foo) with stricter signature/return type than prompt prose
+- Tests import private helpers (_foo) with stricter signature/return than prompt prose
 - Assert pins exact message/format/number with no prompt anchor
-- Binary suite scoring: one test fails → whole suite weight lost
-- Import-time failure zeroing all weighted suites before any behavior runs
-
+- Binary suite scoring: one test fails → whole suite weight lost (score_amplification)
+- Import-time failure zeroing all weighted suites before behavior runs (score_amplification)
+- Integration test passes the behavior but a unit test fails on an undocumented helper API
 ### Phase B — Grading walk (this submission)
-
-6. Read metadata.json and evaluation_result.json — reward, each subscore, exit_code, stdout
-7. Enumerate EVERY failed suite/check that affected reward (name + weight + value)
-8. For EACH failed suite, classify failure stage:
+6. Read metadata.json and evaluation_result.json — reward, each subscore, exit_code, stdout.
+7. Evaluate every reward-affecting failure independently and to completion. 
+Finding one false negative does NOT end the analysis — a submission can contain multiple independent FNs across different suites. 
+Do not stop early, do not let one verdict short-circuit the others, and do not skip low-weight failures 
+(a P2 misalignment is still a misalignment).
+8. Classify each failure's stage:
    - COLLECTION/IMPORT (exit_code=2, NameError, ImportError) — tests never ran
    - ASSERTION (specific test name + error in stdout)
-   - TIMEOUT/INFRA (grader ran out of time, defaulted to 0; flaky non-deterministic assert)
-9. Read file_changes.txt / agent code at the failing location
-10. For each failure, answer the three-way fork:
-
-    Before choosing (c) MISALIGNMENT or tagging FN: run the **implicit-criteria audit**
-    (Phase A) on the full prompt — especially when the nearest API section is silent but
-    examples, error messages, or late-section invariants elsewhere may force the behavior.
-
-    (a) AGENT BUG — violates explicit prompt requirement, or missed implicit criteria
-        deducible from a full-prompt composability chain → NOT a false negative
-    (b) EQUIVALENCE — agent satisfies prompt semantics; grader wants different surface
-        (tuple vs list, Slot vs index, nested helper vs module export) → likely FN
-    (c) MISALIGNMENT — grader requires X; prompt never unambiguously states X;
-        golden may show X but prompt does not → FN if agent work is otherwise correct
-
-Tag each failure in reasoning with failure_mode when applicable:
-- prompt_grader_misalignment — grader pins symbol/signature/shape/message prompt omits
-- spec_ambiguity — prompt allows multiple faithful readings; grader picks golden branch
-  (distinct from misalignment: prompt is ambiguous, grader is consistent with golden)
-- scoring_amplification — grading shape turns small gap/equivalence into disproportionate
-  loss (NEVER flag scoring shape alone — pair with underlying spec gap or equivalence trap)
-- semantic_equivalence — correct behavior, different valid representation prompt allows
-
-Include impact severity in reasoning: P0 (blocks max reward / whole-task zero),
-P1 (meaningful weight at risk), P2 (minor, low weight, obvious reading exists).
-
+   - TIMEOUT/INFRA (ran out of time → 0; flaky/non-deterministic assert)
+9. Read the agent code (file_changes.txt / workspace) at the failing location.
+10. For each failure, choose the fork — but run the implicit-criteria audit on the full
+    prompt FIRST whenever the nearest API section is silent:
+    (a) agent_bug — explicit violation, or missed criteria deducible via a full-prompt chain
+    (b) misalignment — agent satisfies prompt semantics; grader wants a different surface,
+        OR grader pins a symbol/shape/message the prompt omits
+    (c) ambiguity — prompt allows multiple faithful readings; grader picks the golden branch
+Record impact severity per failure:
+- P0 — blocks max reward / zeroes the whole task
+- P1 — meaningful weight at risk
+- P2 — minor, low weight, obvious reading exists
 ### Phase C — Verdict
-
-is_false_negative: true only when all of the following hold:
-
-At least one reward-affecting failure is type (b) prompt–grader misalignment or (c) spec ambiguity / semantic equivalence — not a clear explicit violation.
-You completed the implicit-criteria audit on the full prompt (rules, defaults, ordering, cross-section examples) and found no composable chain of quoted anchors that would force the grader’s expectation.
-You independently verified the agent’s implementation is substantively correct on every explicit prompt requirement for that behavior path (do not trust agent self-assessment).
-You can cite evidence: grader line + missing/ambiguous prompt anchor + agent code showing correct semantics.
-is_false_negative: false when any of the following hold:
-
-Reward is 1.0 (by definition).
-Implicit-criteria audit found a cross-section composability chain that forces the grader expectation (agent overlooked implicit spec — agent_reasoning_failure, not FN).
-All failures trace to explicit prompt violations (wrong file, name, constant, algorithm, semantics where prompt is clear).
-Agent only partially implemented the task.
-Failure is a necessary invariant (e.g. wrong module path, won’t import) and the prompt made that invariant visible or unambiguous.
-Format mismatch when the prompt explicitly pins the exact format (fair failure).
-You cannot verify agent correctness without guessing.
-When uncertain, lean false. Do not hedge — commit to true or false.
-Partial FN: If reward is e.g. 0.8 and one suite failed on misalignment while others failed fairly, is_false_negative can still be true 
-if the misaligned failure materially reduced reward below what prompt-faithful correct work deserves. State full or partial FN explicitly.
-
+is_false_negative: true ONLY when ALL hold:
+- At least one reward-affecting failure is misalignment or ambiguity — not a clear explicit
+  violation.
+- You completed the implicit-criteria audit on the full prompt and found NO composable chain
+  of quoted anchors that forces the grader's expectation.
+- You independently verified the agent's implementation is substantively correct on every
+  explicit prompt requirement for that path (do not trust agent self-assessment).
+- You can cite evidence: grader line + missing/ambiguous prompt anchor + agent code showing
+  correct semantics.
+is_false_negative: false when ANY hold:
+- Reward is 1.0.
+- The audit found a cross-section chain that forces the grader expectation (→ agent_bug).
+- All failures trace to explicit prompt violations (wrong file, name, constant, algorithm,
+  clear semantics).
+- The agent only partially implemented the task.
+- Failure is a necessary invariant (wrong module path, won't import) the prompt made visible.
+- Format mismatch where the prompt explicitly pins the exact format.
+- You cannot verify agent correctness without guessing.
+The top-level is_false_negative is the OR across all analyzed failures: true if ANY single
+failure independently meets the true bar above. Exhaustiveness must NOT lower the bar — each
+FN entry still needs its own cited evidence; do not tag weak candidates just to fill the list.
+When uncertain on a given failure, lean false for that failure. Commit to true or false — do not hedge.
+Partial FN: if reward is e.g. 0.8 and one suite failed on misalignment/ambiguity while
+others failed fairly, is_false_negative can still be true if the misaligned failure
+materially reduced reward below what prompt-faithful correct work deserves. State full vs
+partial FN explicitly.
 ## Required output
-
-Return ONLY JSON — no markdown fences, no bash/cat/heredoc to print it, no commentary
-before or after. Plain text JSON in your final assistant message.
-
+Return ONLY JSON — no markdown fences, no bash/cat/heredoc, no commentary before or after.
+Plain text JSON in your final assistant message.
 {
-  "reasoning": "Phase A: key unstated grader contracts, triangle findings, assert-anchor gaps, implicit-criteria audit (cross-section chains searched). 
-  Phase B: per failed suite with prompt quote vs grader assert vs agent code, failure_mode tags, P0/P1/P2. Phase C: overall verdict (full or partial FN).",
+  "reasoning": "Phase A: unstated grader contracts, triangle findings, assert-anchor gaps, implicit-criteria audit (cross-section chains searched). Phase B: per failed suite with prompt quote vs grader assert vs agent code, tag, P0/P1/P2. Phase C: overall verdict (full or partial FN); per-failure verdicts listed in misaligned_failures.",
   "is_false_negative": true or false,
   "confidence": 0.0 to 1.0,
   "misaligned_failures": [
     {
       "suite": "suite_name",
-      "failure_mode": "prompt_grader_misalignment|spec_ambiguity|scoring_amplification|semantic_equivalence",
+      "tag": "agent_bug|misalignment|ambiguity|score_amplification",
       "impact": "P0|P1|P2",
       "verdict": "false_negative|justified"
     }
   ]
 }
-
-misaligned_failures is optional — include when multiple suites failed and tagging aids clarity.
-Omit or use [] when all failures are justified or only one failure matters.
-
+misaligned_failures MUST contain one entry for EVERY reward-affecting failure you analyzed —
+including justified ones — so the list proves the audit was exhaustive. Order by impact
+(P0 first). Use [] only when there were no reward-affecting failures (reward is 1.0).
 confidence:
-- 0.9+ = cited grader assert + implicit-criteria audit found no composable chain +
-  verified correct agent code
-- 0.5 = two reasonable readings after full-prompt audit, or chain vs ambiguity disputed
-- below 0.5 = guessing, or FN tagged without completing implicit-criteria audit
+- 0.9+ = cited grader assert + audit found no composable chain + verified correct agent code
+- 0.5 = two reasonable readings after the full-prompt audit, or chain-vs-ambiguity disputed
+- below 0.5 = guessing, or FN tagged without completing the implicit-criteria audit
 """
 
 
