@@ -188,116 +188,24 @@ P1 (meaningful weight at risk), P2 (minor, low weight, obvious reading exists).
 
 ### Phase C — Verdict
 
-is_false_negative: true ONLY IF:
-- At least one reward-affecting failure is (b) or (c), AND
-- You completed the **implicit-criteria audit** on the full prompt and found no
-  composable chain of quoted anchors (including cross-section examples) that forces
-  the grader expectation, AND
-- You independently verified the agent's implementation is substantively correct on
-  every explicit prompt requirement for that behavior path, AND
-- You can cite: grader line + missing/ambiguous prompt anchor + agent code showing
-  correct semantics
+is_false_negative: true only when all of the following hold:
 
-is_false_negative: false if:
-- Implicit-criteria audit found a cross-section composability chain that forces the
-  grader expectation (agent overlooked implicit prompt details — not FN)
-- All failures trace to explicit prompt violations
-- Agent only partially implemented the task
-- Failure is a necessary invariant (wrong module path, code won't import) AND the
-  prompt made that invariant visible or unambiguous
-- Format mismatch when prompt explicitly pins exact format (fair failure, not FN)
-- You cannot verify agent correctness without guessing
+At least one reward-affecting failure is type (b) prompt–grader misalignment or (c) spec ambiguity / semantic equivalence — not a clear explicit violation.
+You completed the implicit-criteria audit on the full prompt (rules, defaults, ordering, cross-section examples) and found no composable chain of quoted anchors that would force the grader’s expectation.
+You independently verified the agent’s implementation is substantively correct on every explicit prompt requirement for that behavior path (do not trust agent self-assessment).
+You can cite evidence: grader line + missing/ambiguous prompt anchor + agent code showing correct semantics.
+is_false_negative: false when any of the following hold:
 
-When reward is 1.0 → is_false_negative: false (by definition).
-
-Partial false negatives: if reward is 0.8 and one suite failed on misalignment while
-others failed fairly, is_false_negative can still be true if the misaligned failure
-materially reduced reward below what prompt-faithful correct work deserves. State full
-or partial FN explicitly.
-
-## The core test (apply to every failed check)
-
-"If a careful agent read the **entire** prompt — composing rules, defaults, ordering,
-and cross-section examples — and did NOT guess external conventions, could they still
-fail this exact grader assertion?"
-
-Yes + agent's code matches prompt on the underlying behavior + implicit-criteria audit
-found no composable prompt chain → false negative for that check.
-No, OR a composable chain exists from quoted prompt anchors → justified failure
-(agent_reasoning_failure).
-
-## False-negative causes (0→1 coding tasks)
-
-Flag as FN when evidenced:
-
-1. **Prompt–grader misalignment** — grader checks symbol, signature, return shape,
-   error class, literal, tie-break, or module placement the prompt does not pin.
-2. **Spec ambiguity** — prompt creates split faithful implementations; grader accepts
-   only golden's convention (conflicting statements, unstated return type, tie-breaking).
-3. **Semantic equivalence** — correct behavior, different valid representation; prompt
-   does not mandate the grader's representation.
-4. **Scoring amplification** — small misalignment or trivial defect zeros an entire
-   weighted suite or all suites; agent's implementation is otherwise reachable and
-   largely correct. Must be paired with (1), (2), or (3) — not scoring shape alone.
-5. **Format mismatch** — numerically/semantically correct, different surface format;
-   prompt did not pin exact format. (When prompt pins format → NOT FN.)
-6. **Grader bug / wrong expected behavior** — grader contradicts prompt or golden
-   is wrong (rare; needs strong proof).
-7. **Grader timeout** — grader ran out of time and defaulted to 0; agent work may be
-   correct but never evaluated. Minimal evaluation_result (e.g. {"reward": 0.0}) alone
-   is NOT evidence of timeout — look for timeout signals in stdout/logs.
-8. **Flaky checks** — non-deterministic assertions that intermittently fail correct work.
-9. **Environment failure** — infra blocked agent through no fault of their code (rare).
-
-## NOT a false negative
-
-- Wrong algorithm or wrong semantics where prompt is clear
-- Explicit spec violation (wrong file, wrong name, wrong constant from prompt table)
-- Return type wrong when prompt prose clearly implies objects not indices
-  (e.g. "pick the pair" then "group1 = [seed1]" → seeds are objects)
-- Format mismatch when prompt explicitly pins the exact format (fair failure)
-- Import/syntax errors when "code must load" is fair — UNLESS the ONLY blocker is an
-  unstated typing import and you verified the rest of the implementation would pass
-  (then FN only if misalignment + amplification together; say so explicitly)
-- Integration tests pass same behavior but helper unit test fails on undocumented API
-  → FN if prompt never required that API shape
-- Sibling-task rules not stated in THIS prompt
-- Agent effort, trajectory length, or self-claimed success
-- Grader expectation deducible from a full-prompt composability chain including
-  cross-section examples — agent failed to connect implicit criteria, not FN
-
-## Critical rules
-
-1. **Grader applied its rules ≠ reward is fair.** Internally consistent misalignment
-   still produces false negatives.
-
-2. **Verify agent code independently.** Never trust the agent's self-assessment.
-
-3. **Verify grader expectations against prompt, not against golden alone.** Golden
-   explains what the grader wants; misalignment means golden requires what prompt omits.
-
-4. **FN candidates require implicit-criteria audit first.** Before is_false_negative:
-   true, search the full prompt for cross-section examples and late-section invariants
-   that imply the grader contract. Many apparent misalignments are agent failures to
-   compose spread-out spec (e.g. parser silent, string round-trip section forces shape).
-
-5. **Per-failure analysis in reasoning.** For each failed suite:
-   - suite name, weight lost
-   - failing test / error
-   - prompt quote (or "none — unstated"; if FN candidate, also list implicit-audit
-     anchors searched and whether a composability chain was found)
-   - what agent did
-   - failure_mode tag and P0/P1/P2 if applicable
-   - verdict: justified | false negative
-
-6. **Scoring amplification guardrail.** Binary suite scoring, import-chain zeroing, or
-   heavy weight on one narrow check is NOT a finding unless combined with a spec gap or
-   equivalence trap that makes the penalty disproportionate.
-
-7. **When uncertain, lean false.** is_false_negative: false.
-
-8. **Do not hedge.** Commit to true or false.
-
+Reward is 1.0 (by definition).
+Implicit-criteria audit found a cross-section composability chain that forces the grader expectation (agent overlooked implicit spec — agent_reasoning_failure, not FN).
+All failures trace to explicit prompt violations (wrong file, name, constant, algorithm, semantics where prompt is clear).
+Agent only partially implemented the task.
+Failure is a necessary invariant (e.g. wrong module path, won’t import) and the prompt made that invariant visible or unambiguous.
+Format mismatch when the prompt explicitly pins the exact format (fair failure).
+You cannot verify agent correctness without guessing.
+When uncertain, lean false. Do not hedge — commit to true or false.
+Partial FN: If reward is e.g. 0.8 and one suite failed on misalignment while others failed fairly, is_false_negative can still be true 
+if the misaligned failure materially reduced reward below what prompt-faithful correct work deserves. State full or partial FN explicitly.
 
 ## Required output
 
@@ -305,7 +213,8 @@ Return ONLY JSON — no markdown fences, no bash/cat/heredoc to print it, no com
 before or after. Plain text JSON in your final assistant message.
 
 {
-  "reasoning": "Phase A: key unstated grader contracts, triangle findings, assert-anchor gaps, implicit-criteria audit (cross-section chains searched). Phase B: per failed suite with prompt quote vs grader assert vs agent code, failure_mode tags, P0/P1/P2. Phase C: overall verdict (full or partial FN).",
+  "reasoning": "Phase A: key unstated grader contracts, triangle findings, assert-anchor gaps, implicit-criteria audit (cross-section chains searched). 
+  Phase B: per failed suite with prompt quote vs grader assert vs agent code, failure_mode tags, P0/P1/P2. Phase C: overall verdict (full or partial FN).",
   "is_false_negative": true or false,
   "confidence": 0.0 to 1.0,
   "misaligned_failures": [
@@ -325,7 +234,8 @@ confidence:
 - 0.9+ = cited grader assert + implicit-criteria audit found no composable chain +
   verified correct agent code
 - 0.5 = two reasonable readings after full-prompt audit, or chain vs ambiguity disputed
-- below 0.5 = guessing, or FN tagged without completing implicit-criteria audit"""
+- below 0.5 = guessing, or FN tagged without completing implicit-criteria audit
+"""
 
 
 @env.scenario("coding_task_false_negative_analysis", returns=CodingTaskFalseNegativeResult)
